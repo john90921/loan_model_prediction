@@ -16,7 +16,8 @@ def clean_features(df):
 
     for col in missing_cols:
         df[f"{col}_MISSING"] = df[col].isna().astype(int);
-    
+    df = df.drop(columns = "SK_ID_CURR")
+    df = df[df['CODE_GENDER'] != 'XNA']
     return df
 
 def engineer_features(df):
@@ -58,5 +59,5 @@ def engineer_features(df):
     df["EXT_SOURCE_COUNT"] = df[ext_cols].notna().sum(axis=1)
     text_cols = df.select_dtypes(include=["object"]).columns
     df[text_cols] = df[text_cols].astype("category")
-    print(df)
+    
     return df.replace([np.inf, -np.inf], np.nan)
