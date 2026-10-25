@@ -1,4 +1,3 @@
-import numpy as np
 def clean_features(df):
     df = df.copy()
 
@@ -7,9 +6,7 @@ def clean_features(df):
 
     # Replace negative values with NaN for certain columns
     missing_cols = [
-    "OWN_CAR_AGE",
     "OCCUPATION_TYPE",
-    "EXT_SOURCE_1",
     "EXT_SOURCE_2",
     "EXT_SOURCE_3",
     ]
