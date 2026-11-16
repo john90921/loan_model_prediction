@@ -1,5 +1,24 @@
-import pandas as pd
+"""
+Home Credit application-table feature pipeline (all feature sets combined).
+
+Contents
+  1. clean_features + original add_* feature groups + create_selected_features
+  2. add_extra_features (V2 groups)
+  3. V3 features (credit / timeline / external / bureau / social / region /
+     group stats / frequency encoding)
+  4. build_all_features(): one call for train (+ optional test)
+
+Quick start
+    X_train, y_train, X_test = build_all_features(train_raw, test_raw)
+"""
+
 import numpy as np
+import pandas as pd
+
+
+# ============================================================================
+# 1. ORIGINAL PIPELINE
+# ============================================================================
 def clean_features(df):
     df = df.copy()
 
@@ -17,7 +36,6 @@ def clean_features(df):
     #     df[f"{col}_MISSING"] = df[col].isna().astype(int);
     text_cols = df.select_dtypes(include=["object"]).columns
     df[text_cols] = df[text_cols].astype("category")
-    df = df.drop(columns="SK_ID_CURR")
     df = df[df["CODE_GENDER"] != "XNA"]
     return df
 
@@ -239,6 +257,9 @@ def add_category_interactions(df):
     return df
 
 
+# ============================================================================
+# 2. V2 EXTRA FEATURES
+# ============================================================================
 def add_extra_features(df, groups=None):
     df = df.copy()
 
@@ -526,241 +547,308 @@ def create_selected_features(df, selected=None):
 
     return df.replace([np.inf, -np.inf], np.nan)
 
-    # def engineer_features(df):
-    df = df.copy()
 
-    # =====================================
-    # 1. FINANCIAL BURDEN FEATURES
-    # =====================================
+# ============================================================================
+# 3. V3 FEATURES
+# ============================================================================
+EXT_COLS = ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"]
+BUREAU_COLS = [
+    "AMT_REQ_CREDIT_BUREAU_HOUR",
+    "AMT_REQ_CREDIT_BUREAU_DAY",
+    "AMT_REQ_CREDIT_BUREAU_WEEK",
+    "AMT_REQ_CREDIT_BUREAU_MON",
+    "AMT_REQ_CREDIT_BUREAU_QRT",
+    "AMT_REQ_CREDIT_BUREAU_YEAR",
+]
 
-    if {"AMT_CREDIT", "AMT_ANNUITY"}.issubset(df.columns):
-        df["CREDIT_TERM_RATIO"] = df["AMT_CREDIT"] / df["AMT_ANNUITY"].replace(
-            0, np.nan
-        )
+# Starting guess only (EXT_SOURCE_3 / 2 are usually stronger than 1). Tune it, or
+# fit a logistic regression on the three scores and paste the coefficients here.
+DEFAULT_EXT_WEIGHTS = {"EXT_SOURCE_1": 1.0, "EXT_SOURCE_2": 1.5, "EXT_SOURCE_3": 2.0}
 
-    if {"AMT_INCOME_TOTAL", "AMT_CREDIT"}.issubset(df.columns):
-        df["INCOME_CREDIT_DIFF"] = df["AMT_INCOME_TOTAL"] - df["AMT_CREDIT"]
+GROUP_KEYS = [
+    "ORGANIZATION_TYPE",
+    "OCCUPATION_TYPE",
+    "NAME_EDUCATION_TYPE",
+    "NAME_INCOME_TYPE",
+    "REGION_RATING_CLIENT_W_CITY",
+]
+GROUP_VALUES = ["income", "credit", "annuity", "goods", "ext_mean", "emp_years"]
 
-    if {"AMT_INCOME_TOTAL", "AMT_ANNUITY"}.issubset(df.columns):
-        df["ANNUITY_INCOME_DIFF"] = df["AMT_INCOME_TOTAL"] - df["AMT_ANNUITY"]
-
-    if {"AMT_CREDIT", "AMT_GOODS_PRICE"}.issubset(df.columns):
-        df["LOAN_TO_GOODS_GAP"] = df["AMT_CREDIT"] - df["AMT_GOODS_PRICE"]
-
-    # =====================================
-    # 2. FAMILY FEATURES
-    # =====================================
-
-    if {"AMT_INCOME_TOTAL", "CNT_CHILDREN"}.issubset(df.columns):
-        df["INCOME_PER_CHILD"] = df["AMT_INCOME_TOTAL"] / (df["CNT_CHILDREN"] + 1)
-
-    if {"AMT_CREDIT", "CNT_CHILDREN"}.issubset(df.columns):
-        df["CREDIT_PER_CHILD"] = df["AMT_CREDIT"] / (df["CNT_CHILDREN"] + 1)
-
-    if {"CNT_CHILDREN", "CNT_FAM_MEMBERS"}.issubset(df.columns):
-        df["ADULTS_ESTIMATE"] = df["CNT_FAM_MEMBERS"] - df["CNT_CHILDREN"]
-
-        df["CHILDREN_FAMILY_RATIO"] = df["CNT_CHILDREN"] / df[
-            "CNT_FAM_MEMBERS"
-        ].replace(0, np.nan)
-
-    # =====================================
-    # 3. AGE AND EMPLOYMENT FEATURES
-    # =====================================
-
-    if {"DAYS_BIRTH", "DAYS_EMPLOYED"}.issubset(df.columns):
-        age_days = -df["DAYS_BIRTH"].replace(0, np.nan)
-
-        employed_days = df["DAYS_EMPLOYED"].replace(365243, np.nan)
-
-        df["EMPLOYMENT_AGE_RATIO"] = employed_days / age_days
-
-    if {"DAYS_BIRTH", "DAYS_REGISTRATION"}.issubset(df.columns):
-        df["REGISTRATION_AGE_RATIO"] = df["DAYS_REGISTRATION"] / df[
-            "DAYS_BIRTH"
-        ].replace(0, np.nan)
-
-    if {"DAYS_BIRTH", "DAYS_ID_PUBLISH"}.issubset(df.columns):
-        df["ID_CHANGE_AGE_RATIO"] = df["DAYS_ID_PUBLISH"] / df["DAYS_BIRTH"].replace(
-            0, np.nan
-        )
-
-    # =====================================
-    # 4. EXTERNAL SCORE INTERACTIONS
-    # =====================================
-
-    ext_cols = [
-        c for c in ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"] if c in df.columns
-    ]
-
-    if len(ext_cols) >= 2:
-        scores = df[ext_cols]
-
-        df["EXT_SOURCE_STD"] = scores.std(axis=1)
-        df["EXT_SOURCE_PRODUCT"] = scores.prod(axis=1, min_count=len(ext_cols))
-        df["TOTAL_EXT_MISSING"] = scores.isna().sum(axis=1)
-
-        # Difference between available external scores
-        df["EXT_SOURCE_RANGE"] = scores.max(axis=1) - scores.min(axis=1)
-
-    if {"EXT_SOURCE_1", "EXT_SOURCE_2"}.issubset(df.columns):
-        df["EXT_1_2_PRODUCT"] = df["EXT_SOURCE_1"] * df["EXT_SOURCE_2"]
-
-    if {"EXT_SOURCE_2", "EXT_SOURCE_3"}.issubset(df.columns):
-        df["EXT_2_3_PRODUCT"] = df["EXT_SOURCE_2"] * df["EXT_SOURCE_3"]
-
-    # =====================================
-    # 5. OWNERSHIP FEATURES
-    # =====================================
-
-    if "FLAG_OWN_CAR" in df.columns:
-        df["HAS_CAR"] = (df["FLAG_OWN_CAR"] == "Y").astype("int8")
-
-    if "FLAG_OWN_REALTY" in df.columns:
-        df["HAS_REALTY"] = (df["FLAG_OWN_REALTY"] == "Y").astype("int8")
-
-    if {"FLAG_OWN_CAR", "FLAG_OWN_REALTY"}.issubset(df.columns):
-        df["CAR_AND_REALTY"] = (
-            (df["FLAG_OWN_CAR"] == "Y") & (df["FLAG_OWN_REALTY"] == "Y")
-        ).astype("int8")
-
-    # =====================================
-    # 6. MISSINGNESS FEATURES
-    # =====================================
-
-    missing_cols = [
-        "OWN_CAR_AGE",
-        "OCCUPATION_TYPE",
-        "EXT_SOURCE_1",
-        "EXT_SOURCE_2",
-        "EXT_SOURCE_3",
-        "AMT_GOODS_PRICE",
-        "AMT_ANNUITY",
-    ]
-
-    for col in missing_cols:
-        if col in df.columns:
-            df[col + "_MISSING"] = df[col].isna().astype("int8")
-
-    # =====================================
-    # 7. FINAL CLEANING
-    # =====================================
-
-    return df.replace([np.inf, -np.inf], np.nan)
+ALL_GROUPS = [
+    "credit",
+    "timeline",
+    "external",
+    "bureau",
+    "social",
+    "region",
+    "group",
+    "frequency",
+]
 
 
-# def engineer_features(df):
-#     df = df.copy()
+# ----------------------------------------------------------------------------
+# helpers
+# ----------------------------------------------------------------------------
+def _num(df, col):
+    """Numeric Series for `col`, or all-NaN if the column does not exist."""
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce")
+    return pd.Series(np.nan, index=df.index)
 
-#     # Age and employment
-#     df["AGE_YEARS"] = -df["DAYS_BIRTH"] / 365.25
 
-#     employed = df["DAYS_EMPLOYED"].replace(365243, np.nan)
-#     df["EMPLOYMENT_YEARS"] = -employed / 365.25
-#     df["EMPLOYMENT_ANOMALY"] = (
-#         df["DAYS_EMPLOYED"] == 365243
-#     ).astype(int)
+def _div(a, b):
+    """a / b with 0 -> NaN in the denominator."""
+    return a / b.where(b != 0)
 
-#     # Financial ratios
-#     df["CREDIT_INCOME_RATIO"] = (
-#         df["AMT_CREDIT"] /
-#         df["AMT_INCOME_TOTAL"].replace(0, np.nan)
-#     )
 
-#     df["ANNUITY_INCOME_RATIO"] = (
-#         df["AMT_ANNUITY"] /
-#         df["AMT_INCOME_TOTAL"].replace(0, np.nan)
-#     )
+def _key(df, col):
+    """Group key as string, NaN -> 'Missing'."""
+    if col not in df.columns:
+        return pd.Series("Missing", index=df.index, dtype="string")
+    return df[col].astype("string").fillna("Missing")
 
-#     df["ANNUITY_CREDIT_RATIO"] = (
-#         df["AMT_ANNUITY"] /
-#         df["AMT_CREDIT"].replace(0, np.nan)
-#     )
 
-#     # External scores
-#     ext_cols = [
-#         "EXT_SOURCE_1",
-#         "EXT_SOURCE_2",
-#         "EXT_SOURCE_3"
-#     ]
+def _base(df):
+    """Shared numeric building blocks (computed once)."""
+    b = pd.DataFrame(index=df.index)
+    b["income"] = _num(df, "AMT_INCOME_TOTAL")
+    b["credit"] = _num(df, "AMT_CREDIT")
+    b["annuity"] = _num(df, "AMT_ANNUITY")
+    b["goods"] = _num(df, "AMT_GOODS_PRICE")
+    b["children"] = _num(df, "CNT_CHILDREN")
+    b["family"] = _num(df, "CNT_FAM_MEMBERS")
 
-#     df["EXT_SOURCE_MEAN"] = df[ext_cols].mean(axis=1)
-#     df["EXT_SOURCE_COUNT"] = df[ext_cols].notna().sum(axis=1)
-#     text_cols = df.select_dtypes(include=["object"]).columns
-#     df[text_cols] = df[text_cols].astype("category")
+    b["age_years"] = _num(df, "DAYS_BIRTH").abs() / 365.25
+    # 365243 is the "not employed / pensioner" placeholder
+    b["emp_years"] = _num(df, "DAYS_EMPLOYED").replace(365243, np.nan).abs() / 365.25
+    b["reg_years"] = _num(df, "DAYS_REGISTRATION").abs() / 365.25
+    b["id_years"] = _num(df, "DAYS_ID_PUBLISH").abs() / 365.25
+    b["phone_years"] = _num(df, "DAYS_LAST_PHONE_CHANGE").abs() / 365.25
 
-#     return df.replace([np.inf, -np.inf], np.nan)
+    b["term"] = _div(b["credit"], b["annuity"])  # loan term in payment periods
 
-# def engineer_features2(df):
-#     df = df.copy()
+    for i, c in enumerate(EXT_COLS, 1):
+        b[f"ext{i}"] = _num(df, c)
+    b["ext_mean"] = b[["ext1", "ext2", "ext3"]].mean(axis=1)
+    return b
 
-#     # Financial ratios
-#     ratios = [
-#         ("CREDIT_ANNUITY_RATIO", "AMT_CREDIT", "AMT_ANNUITY"),
-#         ("GOODS_CREDIT_RATIO", "AMT_GOODS_PRICE", "AMT_CREDIT"),
-#         ("INCOME_PER_FAMILY", "AMT_INCOME_TOTAL", "CNT_FAM_MEMBERS"),
-#         ("CREDIT_PER_FAMILY", "AMT_CREDIT", "CNT_FAM_MEMBERS"),
-#     ]
 
-#     for new_col, numerator, denominator in ratios:
-#         if numerator in df.columns and denominator in df.columns:
-#             den = df[denominator].replace(0, np.nan)
-#             df[new_col] = df[numerator] / den
+def _weighted_ext(b, weights):
+    """NaN-aware weighted mean of the available EXT_SOURCE scores."""
+    w = np.array([weights.get(c, 1.0) for c in EXT_COLS], dtype=float)
+    vals = b[["ext1", "ext2", "ext3"]].to_numpy(dtype=float)
+    mask = ~np.isnan(vals)
+    wsum = (mask * w).sum(axis=1)
+    num = np.where(mask, vals * w, 0.0).sum(axis=1)
+    out = np.where(wsum > 0, num / np.where(wsum > 0, wsum, 1.0), np.nan)
+    return pd.Series(out, index=b.index)
 
-#     # Age
-#     if "DAYS_BIRTH" in df.columns:
-#         df["AGE_YEARS"] = -df["DAYS_BIRTH"] / 365.25
 
-#     # Employment: handle the known placeholder
-#     if "DAYS_EMPLOYED" in df.columns:
-#         days = df["DAYS_EMPLOYED"]
-#         df["EMPLOYED_ANOMALY"] = (days == 365243).astype("int8")
-#         valid_days = days.mask(days == 365243)
-#         df["EMPLOYMENT_YEARS"] = -valid_days / 365.25
+# ----------------------------------------------------------------------------
+# feature blocks (each returns a dict of Series)
+# ----------------------------------------------------------------------------
+def _credit_block(b):
+    f = {}
+    monthly_income = b["income"] / 12  # AMT_INCOME_TOTAL is yearly, annuity is per period
 
-#         # if "DAYS_BIRTH" in df.columns:
-#         #     age_days = -df["DAYS_BIRTH"].replace(0, np.nan)
-#         #     df["EMPLOYMENT_AGE_RATIO"] = valid_days / age_days
+    f["V3_AGE_AT_MATURITY"] = b["age_years"] + b["term"] / 12
+    f["V3_DISPOSABLE_INCOME_MONTHLY"] = monthly_income - b["annuity"]
+    f["V3_DISPOSABLE_PER_PERSON"] = _div(monthly_income - b["annuity"], b["family"])
+    f["V3_INCOME_PER_CHILD"] = b["income"] / (1 + b["children"])
+    f["V3_CREDIT_PER_EMPLOYED_YEAR"] = b["credit"] / (1 + b["emp_years"])
+    f["V3_FINANCED_EXTRA_TO_INCOME"] = _div(b["credit"] - b["goods"], b["income"])
+    f["V3_TERM_YEARS_TO_AGE"] = _div(b["term"] / 12, b["age_years"])
+    return f
 
-#     # External scores
-#     ext = [
-#         c for c in
-#         ["EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3"]
-#         if c in df.columns
-#     ]
 
-#     if ext:
-#         scores = df[ext]
-#         df["EXT_MEAN"] = scores.mean(axis=1)
-#         df["EXT_MIN"] = scores.min(axis=1)
-#         df["EXT_MAX"] = scores.max(axis=1)
-#         df["EXT_SPREAD"] = scores.max(axis=1) - scores.min(axis=1)
-#         df["EXT_COUNT"] = scores.notna().sum(axis=1)
+def _timeline_block(b):
+    f = {}
+    f["V3_AGE_AT_ID_PUBLISH"] = b["age_years"] - b["id_years"]
+    f["V3_AGE_AT_REGISTRATION"] = b["age_years"] - b["reg_years"]
+    f["V3_REG_MINUS_ID_YEARS"] = b["reg_years"] - b["id_years"]
+    f["V3_PHONE_MINUS_ID_YEARS"] = b["phone_years"] - b["id_years"]
+    f["V3_EMPLOYED_MINUS_REG_YEARS"] = b["emp_years"] - b["reg_years"]
+    f["V3_EMPLOYED_MINUS_ID_YEARS"] = b["emp_years"] - b["id_years"]
+    return f
 
-#         # for col in ext:
-#         #     df[col + "_MISSING"] = df[col].isna().astype("int8")
 
-#     # Social-circle indicators
-#     for col in [
-#         "DEF_30_CNT_SOCIAL_CIRCLE",
-#         "DEF_60_CNT_SOCIAL_CIRCLE",
-#         "OBS_30_CNT_SOCIAL_CIRCLE",
-#         "OBS_60_CNT_SOCIAL_CIRCLE",
-#     ]:
-#         if col in df.columns:
-#             df[col + "_MISSING"] = df[col].isna().astype("int8")
+def _external_block(b, weights):
+    f = {}
+    ext_w = _weighted_ext(b, weights)
+    f["V3_EXT_WEIGHTED"] = ext_w
+    f["V3_EXT_GEOMEAN"] = np.exp(np.log(b[["ext1", "ext2", "ext3"]].clip(lower=1e-6)).mean(axis=1))
 
-#     # Count document flags, if available
-#     doc_cols = [
-#         c for c in df.columns
-#         if c.startswith("FLAG_DOCUMENT_")
-#     ]
-#     if doc_cols:
-#         df["DOCUMENT_FLAGS_SUM"] = df[doc_cols].fillna(0).sum(axis=1)
+    f["V3_EXT_W_X_TERM"] = ext_w * b["term"]
+    f["V3_EXT_W_X_EMP_YEARS"] = ext_w * b["emp_years"]
+    f["V3_EXT_W_X_INCOME_PP"] = ext_w * np.log1p(_div(b["income"], b["family"]).clip(lower=0))
+    f["V3_EXT_W_X_INCOME_TO_CREDIT"] = ext_w * _div(b["income"], b["credit"])
 
-#     # Preserve missingness in selected variables
-#     for col in ["OWN_CAR_AGE", "OCCUPATION_TYPE", "AMT_GOODS_PRICE"]:
-#         if col in df.columns:
-#             df[col + "_MISSING"] = df[col].isna().astype("int8")
+    for i in (1, 2, 3):
+        f[f"V3_EXT{i}_X_TERM"] = b[f"ext{i}"] * b["term"]
+        f[f"V3_EXT{i}_X_EMP_YEARS"] = b[f"ext{i}"] * b["emp_years"]
+    return f
 
-#     return df.replace([np.inf, -np.inf], np.nan)
+
+def _bureau_block(df):
+    f = {}
+    v = {c: _num(df, c) for c in BUREAU_COLS}
+    h, d, w, m, q, y = (v[c] for c in BUREAU_COLS)
+
+    recent = pd.concat([h, d, w, m], axis=1).sum(axis=1, min_count=1)
+    total = pd.concat([h, d, w, m, q, y], axis=1).sum(axis=1, min_count=1)
+
+    # The windows are non-overlapping; approximate lengths: MON~1, QRT~2, YEAR~9 months
+    rate_recent = recent
+    rate_qrt = q / 2
+    rate_year = y / 9
+
+    f["V3_BUREAU_RECENT_COUNT"] = recent
+    f["V3_BUREAU_RECENT_SHARE"] = recent / (total + 1)
+    f["V3_BUREAU_ACCEL_SHORT"] = rate_recent - rate_qrt
+    f["V3_BUREAU_ACCEL_LONG"] = rate_qrt - rate_year
+    return f
+
+
+def _social_block(df):
+    f = {}
+    o30 = _num(df, "OBS_30_CNT_SOCIAL_CIRCLE")
+    d30 = _num(df, "DEF_30_CNT_SOCIAL_CIRCLE")
+    o60 = _num(df, "OBS_60_CNT_SOCIAL_CIRCLE")
+    d60 = _num(df, "DEF_60_CNT_SOCIAL_CIRCLE")
+
+    f["V3_DEF_NEW_30_60"] = d60 - d30  # defaults that appeared in days 31-60
+    f["V3_OBS_NEW_30_60"] = o60 - o30
+    # Laplace-smoothed rates keep a value when OBS == 0 (the plain ratio gives NaN)
+    f["V3_DEF30_SMOOTH"] = d30 / (o30 + 1)
+    f["V3_DEF60_SMOOTH"] = d60 / (o60 + 1)
+    f["V3_DEF_SMOOTH_DIFF"] = f["V3_DEF60_SMOOTH"] - f["V3_DEF30_SMOOTH"]
+    return f
+
+
+def _region_block(df, b):
+    f = {}
+    r = _num(df, "REGION_RATING_CLIENT")
+    rc = _num(df, "REGION_RATING_CLIENT_W_CITY")
+    f["V3_REGION_RATING_DIFF"] = rc - r
+    f["V3_REGION_RATING_SUM"] = rc + r
+    f["V3_REGION_RATING_X_EXT"] = rc * b["ext_mean"]
+    return f
+
+
+# ----------------------------------------------------------------------------
+# reference-based blocks (group stats, frequency encoding)
+# ----------------------------------------------------------------------------
+def fit_v3_reference(df, group_keys=None, group_values=None, freq_cols=None):
+    """
+    Learn group means and category frequencies. Target-free, so it is safe to fit
+    on train+test together. Fit ONCE, then reuse for every split.
+    """
+    group_keys = [k for k in (group_keys or GROUP_KEYS) if k in df.columns]
+    group_values = group_values or GROUP_VALUES
+    if freq_cols is None:
+        freq_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
+
+    b = _base(df)
+    group_means = {}
+    for key in group_keys:
+        group_means[key] = b[group_values].groupby(_key(df, key)).mean()
+
+    freq_maps = {
+        c: _key(df, c).value_counts(normalize=True) for c in freq_cols if c in df.columns
+    }
+    return {
+        "group_keys": group_keys,
+        "group_values": group_values,
+        "group_means": group_means,
+        "freq_maps": freq_maps,
+    }
+
+
+def _group_block(df, b, ref):
+    f = {}
+    for key in ref["group_keys"]:
+        k = _key(df, key)
+        for val in ref["group_values"]:
+            mean = k.map(ref["group_means"][key][val]).astype(float)
+            name = f"V3_GRP_{key}_{val.upper()}"
+            f[f"{name}_DIFF"] = b[val] - mean
+            f[f"{name}_RATIO"] = _div(b[val], mean)
+    return f
+
+
+def _frequency_block(df, ref):
+    f = {}
+    for col, freq in ref["freq_maps"].items():
+        f[f"V3_FREQ_{col}"] = _key(df, col).map(freq).astype(float).fillna(0.0)
+    return f
+
+
+# ----------------------------------------------------------------------------
+# public entry point
+# ----------------------------------------------------------------------------
+def add_v3_features(df, ref=None, groups=None, ext_weights=None):
+    groups = ALL_GROUPS if groups is None else groups
+    ext_weights = ext_weights or DEFAULT_EXT_WEIGHTS
+
+    if ("group" in groups or "frequency" in groups) and ref is None:
+        raise ValueError("'group' / 'frequency' blocks need ref=fit_v3_reference(...)")
+
+    b = _base(df)
+    new = {}
+
+    if "credit" in groups:
+        new.update(_credit_block(b))
+    if "timeline" in groups:
+        new.update(_timeline_block(b))
+    if "external" in groups:
+        new.update(_external_block(b, ext_weights))
+    if "bureau" in groups:
+        new.update(_bureau_block(df))
+    if "social" in groups:
+        new.update(_social_block(df))
+    if "region" in groups:
+        new.update(_region_block(df, b))
+    if "group" in groups:
+        new.update(_group_block(df, b, ref))
+    if "frequency" in groups:
+        new.update(_frequency_block(df, ref))
+
+    new_df = pd.DataFrame(new, index=df.index).replace([np.inf, -np.inf], np.nan)
+    new_df = new_df.astype("float32")
+    return pd.concat([df, new_df], axis=1)
+
+
+# ============================================================================
+# 4. ONE-CALL PIPELINE
+# ============================================================================
+def build_all_features(
+    data,
+    selected=None,
+    extra_groups=None,
+    v3_groups=None,
+    ext_weights=None,
+    target_col="TARGET",
+):
+    """
+    clean -> original groups -> V2 extras -> V3 features.
+
+    `data` may be train only, or train+test concatenated (test TARGET = NaN).
+    TARGET is held out while features are built, then reattached, so it cannot
+    change MISSING_FEATURE_COUNT. V3 group/frequency stats are fit on `data`
+    itself (no target used). Returns one DataFrame with the original index
+    reset to 0..n-1; rows with CODE_GENDER == "XNA" are dropped.
+    """
+    data = data.reset_index(drop=True)
+    target = data[target_col] if target_col in data.columns else None
+    full = data.drop(columns=[target_col], errors="ignore")
+
+    full = clean_features(full)
+    full = create_selected_features(full, selected)
+    full = add_extra_features(full, extra_groups)
+
+    ref = fit_v3_reference(full)
+    full = add_v3_features(full, ref, groups=v3_groups, ext_weights=ext_weights)
+
+    if target is not None:
+        full[target_col] = target.loc[full.index]
+    return full
